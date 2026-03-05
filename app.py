@@ -1,346 +1,156 @@
 import streamlit as st
 import pandas as pd
-import numpy as np
-import random
-import json
-import requests
-from openai import OpenAI
+from api_service import get_channel_info, get_videos_and_stats, get_comments_and_replies, comprehensive_ai_analysis, generate_influencer_summary
+from metrics import calculate_tis, get_tis_status, calculate_kols, get_tech_comments, calculate_3d_matrix, get_campaign_suitability
 
-# 1. SAYFA AYARLARI EN ÜSTTE OLMALI
-st.set_page_config(page_title="Influencer Etki Analizi", page_icon="📸", layout="wide")
+st.set_page_config(page_title="KOL & Etki Analizi", page_icon="📸", layout="wide")
 
-# 2. ŞİFRE KONTROL EKRANI (KAPI GÖREVLİSİ)
 if "authenticated" not in st.session_state:
     st.session_state.authenticated = False
 
 if not st.session_state.authenticated:
     st.warning("🔒 Bu araç sadece ekip kullanımına özeldir.")
-    
-    # Kullanıcıdan şifre iste
     entered_password = st.text_input("Lütfen Takım Şifresini Girin:", type="password")
     
     if st.button("Giriş Yap"):
-        # Girilen şifreyi Secrets dosyasındakiyle karşılaştır
-        correct_password = st.secrets.get("SIFRE")
-        
-        if entered_password == correct_password:
+        if entered_password == st.secrets.get("SIFRE"):
             st.session_state.authenticated = True
-            st.rerun() # Şifre doğruysa sayfayı yenile ve içeri al
+            try:
+                st.rerun()
+            except AttributeError:
+                st.experimental_rerun()
         else:
             st.error("❌ Hatalı şifre! Lütfen tekrar deneyin.")
-            
-    # Şifre girilene kadar kodun GERİ KALANINI ÇALIŞTIRMA!
     st.stop()
 
-class InfluencerAnalyzer:
-    def __init__(self, openai_api_key=None, youtube_api_key=None):
-        # Save metriği kaldırıldı, sadece geçerli metriklerin ağırlıkları kaldı
-        self.w_like = 1
-        self.w_comment = 2
-        self.w_share = 3
+YOUTUBE_API_KEY = st.secrets.get("YOUTUBE_API_KEY")
+OPENAI_API_KEY = st.secrets.get("OPENAI_API_KEY")
+
+st.title("📸 Influencer & KOL Analiz Radarı")
+st.markdown("Fujifilm Türkiye - Sektörel Etki ve Fikir Liderliği Ölçüm Aracı")
+st.divider()
+
+channel_input = st.text_input("YouTube Kanal ID veya @KullanıcıAdı Girin:", placeholder="Örn: @cicekileteknoloji")
+
+if st.button("Analizi Başlat", type="primary"):
+    if channel_input:
         
-        self.api_key = openai_api_key
-        self.youtube_api_key = youtube_api_key
-        
-        if self.api_key:
-            self.client = OpenAI(api_key=self.api_key)
-        else:
-            self.client = None
-
-    def fetch_youtube_data(self, channel_handle):
-        if not self.youtube_api_key:
-            return {"error": "YouTube API anahtarı bulunamadı!"}
-
-        try:
-            clean_api_key = self.youtube_api_key.strip()
-            handle = channel_handle.replace("@", "").strip()
-            
-            # 1. Kanal Bilgilerini Çek
-            channel_url = f"https://youtube.googleapis.com/youtube/v3/channels?part=statistics,contentDetails&forHandle={handle}&key={clean_api_key}"
-            channel_response = requests.get(channel_url).json()
-            
-            if "error" in channel_response:
-                return {"error": f"YouTube API İsteği Reddedildi: {channel_response['error']['message']}"}
-
-            if "items" not in channel_response:
-                return {"error": f"Kanal bulunamadı. Aranan isim: @{handle}"}
+        # 1. AŞAMA: VERİ ÇEKME
+        with st.spinner("Sektörel radar devrede. API'den veriler çekiliyor..."):
+            ch_data = get_channel_info(channel_input, YOUTUBE_API_KEY)
+            if not ch_data:
+                st.error("Kanal bulunamadı.")
+                st.stop()
                 
-            channel_data = channel_response["items"][0]
-            followers = int(channel_data["statistics"]["subscriberCount"])
-            uploads_playlist_id = channel_data["contentDetails"]["relatedPlaylists"]["uploads"]
-
-            # 2. Son 10 Videonun ID'lerini Çek
-            playlist_url = f"https://youtube.googleapis.com/youtube/v3/playlistItems?part=contentDetails&playlistId={uploads_playlist_id}&maxResults=10&key={clean_api_key}"
-            playlist_response = requests.get(playlist_url).json()
-            video_ids = [item["contentDetails"]["videoId"] for item in playlist_response.get("items", [])]
-
-            # 3. Bu 10 Videonun İstatistiklerini ve Başlıklarını Çek (snippet eklendi)
-            posts = []
-            if video_ids:
-                videos_url = f"https://youtube.googleapis.com/youtube/v3/videos?part=statistics,snippet&id={','.join(video_ids)}&key={clean_api_key}"
-                videos_response = requests.get(videos_url).json()
-                
-                for video in videos_response.get("items", []):
-                    stats = video.get("statistics", {})
-                    snippet = video.get("snippet", {})
-                    posts.append({
-                        "title": snippet.get("title", "Bilinmeyen Video"),
-                        "views": int(stats.get("viewCount", 0)),
-                        "likes": int(stats.get("likeCount", 0)),
-                        "comments": int(stats.get("commentCount", 0)),
-                        "shares": int(stats.get("likeCount", 0)) // 10 # Paylaşım simülasyonu
-                    })
-
-            # 4. GÜÇLENDİRİLMİŞ YORUM TOPLAMA ALGORİTMASI (Son 10 Video - 15 Yorum)
-            sample_comments = []
+            ch_title = str(ch_data['snippet'].get('title', 'Bilinmeyen Kanal'))
+            ch_subs = int(ch_data['statistics'].get('subscriberCount', 0))
+            ch_id = ch_data['id']
             
-            for vid in video_ids:
-                comments_url = f"https://youtube.googleapis.com/youtube/v3/commentThreads?part=snippet&videoId={vid}&maxResults=15&order=relevance&key={clean_api_key}"
-                comments_response = requests.get(comments_url).json()
-                
-                if "error" in comments_response:
-                    continue
-                    
-                for item in comments_response.get("items", []):
-                    try:
-                        comment_text = item["snippet"]["topLevelComment"]["snippet"]["textOriginal"]
-                        sample_comments.append(comment_text)
-                    except KeyError:
-                        continue
-
-            if len(sample_comments) > 150:
-                sample_comments = random.sample(sample_comments, 150)
-
-            if not sample_comments:
-                sample_comments = ["Bu kanalın son videolarında yorumlar kapalı, sistem otomatik nötr puan vermiştir."]
-
-            return {
-                "username": channel_handle,
-                "platform": "youtube",
-                "followers": followers,
-                "posts": posts, # Artık başlıkları da içeriyor
-                "sample_comments": sample_comments
-            }
+            try:
+                uploads_id = ch_data['contentDetails']['relatedPlaylists']['uploads']
+            except KeyError:
+                st.error("Kanalın video listesine ulaşılamıyor.")
+                st.stop()
             
-        except Exception as e:
-            return {"error": f"YouTube verileri çekilirken hata oluştu: {str(e)}"}
+            all_videos, top_10 = get_videos_and_stats(uploads_id, YOUTUBE_API_KEY, 50)
+            if not top_10:
+                st.warning("Uygun VOD video bulunamadı.")
+                st.stop()
 
-    def fetch_data(self, username, platform="instagram"):
-        if platform.lower() == "youtube":
-            return self.fetch_youtube_data(username)
+            vid_ids = [v['id'] for v in top_10]
+            raw_comments, creator_replies = get_comments_and_replies(vid_ids, ch_id, YOUTUBE_API_KEY)
             
-        # Instagram Simülasyonunu da yeni yapıya uygun hale getirdik
-        return {
-            "username": username,
-            "platform": platform,
-            "followers": 150000,
-            "posts": [
-                {
-                    "title": f"Instagram Gönderisi {i+1}",
-                    "views": random.randint(50000, 200000),
-                    "likes": random.randint(2000, 10000),
-                    "comments": random.randint(50, 500),
-                    "shares": random.randint(20, 300)
-                } for i in range(10)
-            ],
-            "sample_comments": ["Harika!", "Bu lensi nereden aldınız?", "gt", "Fiyat performans nasıl?"]
-        }
-
-    def calculate_metrics(self, data):
-        if "error" in data or not data.get("posts"):
-            return {"error": "Metrik hesaplanacak veri bulunamadı."}
-
-        df = pd.DataFrame(data["posts"])
-        followers = data["followers"]
-        
-        if followers == 0:
-            followers = 1
+        # 2. AŞAMA: HESAPLAMALAR VE YAPAY ZEKA
+        with st.spinner("Yapay Zeka yorumları inceliyor ve 3 Boyutlu Matris hesaplanıyor..."):
             
-        total_likes = df["likes"].sum()
-        total_comments = df["comments"].sum()
-        total_shares = df["shares"].sum()
-        total_views = df["views"].sum()
-
-        # Save metriği formülden çıkarıldı
-        weighted_engagement = (
-            (self.w_like * total_likes) +
-            (self.w_comment * total_comments) +
-            (self.w_share * total_shares)
-        )
-        
-        weighted_er = (weighted_engagement / (followers * 10)) * 100
-        view_efficiency = (total_views / (followers * 10)) * 100
-
-        return {
-            "weighted_er_percent": round(weighted_er, 2),
-            "view_efficiency_percent": round(view_efficiency, 2),
-            "raw_stats": data["posts"] # Ham listeyi tablo için doğrudan döndürüyoruz
-        }
-
-    def analyze_nlp(self, comments):
-        if not self.client:
-            return {"error": "OpenAI API Anahtarı bulunamadı."}
-        if not comments:
-            return {"error": "Analiz edilecek yorum bulunamadı."}
-
-        comments_text = "\n".join([f"- {c}" for c in comments])
-        
-        prompt = f"""
-        Aşağıdaki sosyal medya yorumlarını analiz et. Hedef kitle genellikle fotoğrafçılık, dijital kameralar, lensler ve ekipmanlar ile ilgilenen kişiler.
-        
-        Yorumlar:
-        {comments_text}
-        
-        Lütfen bu yorumları inceleyerek aşağıdaki metrikleri 0 ile 100 arasında bir yüzde (sayı) olarak hesapla:
-        1. follower_quality_score: Yorumların ne kadarı gerçek, anlamlı ve konuyla ilgili? (Bot, spam, emoji odaklıları dışla).
-        2. purchase_intent_score: Yorumların ne kadarında bir ürün satın alma, fiyat sorma, teknik detay öğrenme veya tavsiye isteme niyeti var?
-        3. sentiment_positive: Pozitif yorum oranı.
-        4. sentiment_negative: Negatif yorum oranı.
-        5. sentiment_neutral: Nötr yorum oranı.
-
-        SADECE AŞAĞIDAKİ FORMATTA GEÇERLİ BİR JSON DÖNDÜR:
-        {{
-            "follower_quality_score": 80,
-            "purchase_intent_score": 25,
-            "sentiment_positive": 60,
-            "sentiment_negative": 10,
-            "sentiment_neutral": 30
-        }}
-        """
-
-        try:
-            response = self.client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=[
-                    {"role": "system", "content": "Sen veri analizi yapan ve sadece istenilen JSON formatında çıktı üreten bir asistansın."},
-                    {"role": "user", "content": prompt}
-                ],
-                temperature=0.2
+            # Önce TIS ve Etiketini hesaplıyoruz (Yapay zekaya göndermek için)
+            avg_tis = calculate_tis(top_10)
+            tis_label, tis_icon = get_tis_status(avg_tis)
+            
+            tech_comments = get_tech_comments(raw_comments)
+            tech_comments_count = len(tech_comments)
+            
+            ai_data = comprehensive_ai_analysis(tech_comments if tech_comments else raw_comments, OPENAI_API_KEY)
+            purchase_intent_count = ai_data.get("purchase_intent", 0)
+            
+            kols_score = calculate_kols(top_10, creator_replies, tech_comments_count)
+            reach_score, engagement_score, final_score = calculate_3d_matrix(top_10, kols_score)
+            uygunluk, renk, ikon = get_campaign_suitability(final_score)
+            
+            # STRATEJİST YAPAY ZEKAYI ÇAĞIRIYORUZ (Sadece istediğimiz 4 metrik ve TIS etiketiyle)
+            ai_summary_text = generate_influencer_summary(
+                ch_title, final_score, reach_score, kols_score, avg_tis, tis_label, OPENAI_API_KEY
             )
-            
-            result_text = response.choices[0].message.content.strip()
-            if result_text.startswith("```json"):
-                result_text = result_text[7:-3]
-            elif result_text.startswith("```"):
-                result_text = result_text[3:-3]
-                
-            return json.loads(result_text)
-            
-        except Exception as e:
-            return {"error": f"OpenAI API Hatası: {str(e)}"}
 
-    def calculate_final_score(self, metrics, nlp_results):
-        if "error" in metrics or "error" in nlp_results:
-            return 0, "Hesaplama Hatası"
-
-        er_score = min(metrics.get("weighted_er_percent", 0) * 5, 100) * 0.40
-        view_score = min(metrics.get("view_efficiency_percent", 0), 100) * 0.20
-        quality_score = nlp_results.get("follower_quality_score", 0) * 0.20
-        intent_score = min(nlp_results.get("purchase_intent_score", 0) * 3, 100) * 0.20
-
-        final_score = er_score + view_score + quality_score + intent_score
+        # 3. AŞAMA: EKRANA ÇİZDİRME
+        st.divider()
+        st.subheader(f"Analiz Raporu: {ch_title}")
         
-        if final_score >= 75:
-            suitability = "Çok İyi"
-        elif final_score >= 50:
-            suitability = "Ortalama"
-        else:
-            suitability = "Riskli"
-
-        return round(final_score, 2), suitability
-
-
-# --- WEB ARAYÜZÜ (STREAMLIT) ---
-st.set_page_config(page_title="Influencer Etki Analizi", page_icon="📸", layout="wide")
-
-st.title("📸 Influencer Etki Analiz Aracı")
-st.markdown("Pazarlama kampanyaları için potansiyel influencer'ların etkileşim ve kitle kalitesini analiz edin.")
-
-try:
-    openai_key = st.secrets.get("OPENAI_API_KEY")
-    youtube_key = st.secrets.get("YOUTUBE_API_KEY")
-except Exception:
-    openai_key = None
-    youtube_key = None
-
-if not openai_key or not youtube_key:
-    st.error("⚠️ Sistem Hatası: `.streamlit/secrets.toml` dosyası eksik veya API anahtarları tanımlanmamış.")
-
-st.sidebar.header("Analiz Ayarları")
-username = st.sidebar.text_input("Kullanıcı Adı / Handle", value="@cnklgl")
-platform = st.sidebar.selectbox("Platform", ["YouTube", "Instagram"])
-
-if st.sidebar.button("Analizi Başlat"):
-    if openai_key and youtube_key:
-        with st.spinner(f"{username} için 10 video ve 150 yorum analiz ediliyor. Bu işlem birkaç saniye sürebilir..."):
-            analyzer = InfluencerAnalyzer(openai_api_key=openai_key, youtube_api_key=youtube_key)
+        # YAPAY ZEKA YÖNETİCİ ÖZETİ KUTUSU
+        st.info(f"💡 **Ürün Konumlandırma Stratejisi:**\n\n{ai_summary_text}")
+        st.write("")
+        
+        # --- ÜST PANEL ---
+        top_col1, top_col2, top_col3 = st.columns([1, 1, 2])
+        top_col1.caption("🌟 Influencer Skoru (0-100)")
+        top_col1.subheader(f"{final_score:.2f}")
+        
+        top_col2.caption("👥 Toplam Takipçi")
+        top_col2.subheader(f"{ch_subs:,}")
+        
+        with top_col3:
+            st.write("")
+            if renk == "success": st.success(f"{ikon} Kampanya Uygunluğu: {uygunluk}")
+            elif renk == "info": st.info(f"{ikon} Kampanya Uygunluğu: {uygunluk}")
+            elif renk == "warning": st.warning(f"{ikon} Kampanya Uygunluğu: {uygunluk}")
+            else: st.error(f"{ikon} Kampanya Uygunluğu: {uygunluk}")
             
-            data = analyzer.fetch_data(username, platform.lower())
+        st.divider()
+        
+        # --- ORTA PANEL ---
+        st.markdown("### 📊 3 Boyutlu Performans Matrisi")
+        m_col1, m_col2, m_col3, m_col4 = st.columns(4)
+        
+        m_col1.caption("📈 Erişim Gücü (%30)")
+        m_col1.subheader(f"{reach_score:.2f} / 100")
+        
+        m_col2.caption("🤝 Etkileşim (TER) (%30)")
+        m_col2.subheader(f"{engagement_score:.2f} / 100")
+        
+        m_col3.caption("🧠 KOLs (Otorite) (%40)")
+        m_col3.subheader(f"{kols_score:.2f} / 100")
+        
+        with m_col4:
+            st.caption("🔍 TIS (Gerçek Etki)")
+            st.subheader(f"{avg_tis:.2f}")
+            st.markdown(f"{tis_icon} *{tis_label}*")
+
+        st.divider()
+        
+        # --- ALT PANEL ---
+        bot_col1, bot_col2 = st.columns([3, 2])
+        with bot_col1:
+            st.markdown("📌 **Son 10 Gönderinin (Sadece VOD) Detaylı Analizi:**")
+            df = pd.DataFrame(top_10)[['title', 'views', 'likes', 'comments', 'shares']]
+            df.columns = ["Video Başlığı", "İzlenme", "Beğeni", "Yorum", "Paylaşım"]
             
-            if "error" in data:
-                st.error(data["error"])
-            else:
-                metrics = analyzer.calculate_metrics(data)
-                nlp_results = analyzer.analyze_nlp(data["sample_comments"])
+            for col in ["İzlenme", "Beğeni", "Yorum", "Paylaşım"]:
+                df[col] = df[col].apply(lambda x: f"{x:,}".replace(",", "."))
                 
-                if "error" in nlp_results:
-                    st.error(nlp_results["error"])
-                else:
-                    final_score, suitability = analyzer.calculate_final_score(metrics, nlp_results)
-                    
-                    st.header(f"Analiz Raporu: {username}")
-                    col1, col2, col3 = st.columns(3)
-                    with col1:
-                        st.metric(label="🌟 Influencer Skoru (0-100)", value=final_score)
-                    with col2:
-                        st.metric(label="👥 Toplam Takipçi", value=f"{data['followers']:,}")
-                    with col3:
-                        if suitability == "Çok İyi":
-                            st.success(f"Kampanya Uygunluğu: {suitability}")
-                        elif suitability == "Ortalama":
-                            st.warning(f"Kampanya Uygunluğu: {suitability}")
-                        else:
-                            st.error(f"Kampanya Uygunluğu: {suitability}")
-
-                    st.divider()
-
-                    # Tablo kısmını sayfa geneline yaymak için alt alta aldık
-                    col_metrics, col_nlp = st.columns(2)
-                    
-                    with col_metrics:
-                        st.subheader("📊 Performans Metrikleri")
-                        st.metric(label="Ağırlıklı Etkileşim Oranı (Weighted ER)", value=f"%{metrics.get('weighted_er_percent', 0)}")
-                        st.metric(label="Görüntülenme Verimliliği", value=f"%{metrics.get('view_efficiency_percent', 0)}")
-
-                    with col_nlp:
-                        st.subheader("🧠 Yapay Zeka Kitle Analizi")
-                        st.metric(label="Takipçi Kalitesi (Gerçek Yorum Oranı)", value=f"%{nlp_results.get('follower_quality_score', 0)}")
-                        st.metric(label="Satın Alma Niyeti Puanı", value=f"%{nlp_results.get('purchase_intent_score', 0)}")
-
-                    st.divider()
-
-                    # Son 10 Video tablosu ve NLP grafiği
-                    col_table, col_chart = st.columns([2, 1]) # Tabloya daha fazla genişlik (2/3 oranında) veriyoruz
-                    
-                    with col_table:
-                        st.write("📌 **Son 10 Gönderinin Detaylı Analizi:**")
-                        df_posts = pd.DataFrame(metrics.get('raw_stats', []))
-                        if not df_posts.empty:
-                            # Sütun isimlerini Türkçeleştirip daha şık gösteriyoruz
-                            df_posts = df_posts.rename(columns={
-                                "title": "Video Başlığı",
-                                "views": "İzlenme",
-                                "likes": "Beğeni",
-                                "comments": "Yorum",
-                                "shares": "Paylaşım"
-                            })
-                            # Tabloyu Streamlit'e bas (index gizli)
-                            st.dataframe(df_posts, use_container_width=True, hide_index=True)
-
-                    with col_chart:
-                        st.write("📌 **Duygu Analizi Dağılımı:**")
-                        sentiment_data = pd.DataFrame({
-                            "Duygu": ["Pozitif", "Nötr", "Negatif"],
-                            "Oran (%)": [nlp_results.get('sentiment_positive', 0), nlp_results.get('sentiment_neutral', 0), nlp_results.get('sentiment_negative', 0)]
-                        })
-                        st.bar_chart(sentiment_data.set_index("Duygu"))
+            st.dataframe(df, hide_index=True, use_container_width=True)
+            
+        with bot_col2:
+            st.markdown("### 🤖 Yapay Zeka Kitle Analizi")
+            st.caption("Takipçi Kalitesi (Gerçek Yorum Oranı)")
+            st.subheader(f"%{ai_data.get('real_ratio', 0)}")
+            
+            st.caption("Satın Alma Niyeti (Potansiyel Müşteri)")
+            st.subheader(f"{purchase_intent_count} Adet")
+            
+            st.write("")
+            st.markdown("📌 **Duygu Analizi Dağılımı:**")
+            chart_data = pd.DataFrame({
+                "Duygu": ["Negatif", "Nötr", "Pozitif"],
+                "Yüzde": [ai_data.get('neg', 0), ai_data.get('neu', 0), ai_data.get('pos', 0)]
+            })
+            st.bar_chart(chart_data.set_index("Duygu"))
